@@ -91,87 +91,82 @@ impl RPKITool {
         }
     }
 
-    #[tool(description = "Status of the RPKI relying party")]
-    async fn status(&self) -> Result<CallToolResult, McpError> {
-        match reqwest::get(format!("{}/api/v1/status", self.endpoint)).await {
-            Ok(res) => match res.json::<StatusResponse>().await {
-                Ok(status_data) => match serde_json::to_value(status_data) {
-                    Ok(json_value) => Ok(CallToolResult::structured(json_value)),
-                    Err(err) => Err(McpError {
-                        code: ErrorCode(-1),
-                        message: Cow::from(err.to_string()),
+    /// Generic helper to fetch JSON from an endpoint and return it as a CallToolResult
+    async fn fetch_json_response<T>(url: String) -> Result<CallToolResult, McpError>
+    where
+        T: for<'de> Deserialize<'de> + Serialize,
+    {
+        match reqwest::get(&url).await {
+            Ok(res) => {
+                // Handle HTTP error status codes
+                if !res.status().is_success() {
+                    let status_code = res.status().as_u16() as i32;
+                    let error_text = res
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    tracing::error!("HTTP error {}: {}", status_code, error_text);
+                    return Err(McpError {
+                        code: ErrorCode(status_code),
+                        message: Cow::from(error_text),
                         data: None,
-                    }),
-                },
-                Err(err) => {
-                    tracing::error!("{:?}", &err);
-                    Err(McpError {
-                        code: err
-                            .status()
-                            .map(|s| ErrorCode(s.as_u16() as i32))
-                            .unwrap_or(ErrorCode(-1)),
-                        message: Cow::from(err.to_string()),
-                        data: None,
-                    })
+                    });
                 }
-            },
+
+                match res.json::<T>().await {
+                    Ok(data) => match serde_json::to_value(data) {
+                        Ok(json_value) => Ok(CallToolResult::structured(json_value)),
+                        Err(err) => {
+                            tracing::error!("Failed to serialize response: {:?}", err);
+                            Err(McpError {
+                                code: ErrorCode(-1),
+                                message: Cow::from(format!("Failed to serialize response: {err}")),
+                                data: None,
+                            })
+                        }
+                    },
+                    Err(err) => {
+                        tracing::error!("Failed to parse JSON response: {:?}", err);
+                        Err(McpError {
+                            code: err
+                                .status()
+                                .map(|s| ErrorCode(s.as_u16() as i32))
+                                .unwrap_or(ErrorCode(-1)),
+                            message: Cow::from(format!("Failed to parse response: {err}")),
+                            data: None,
+                        })
+                    }
+                }
+            }
             Err(err) => {
-                tracing::error!("{:?}", &err);
+                tracing::error!("Request failed: {:?}", err);
                 Err(McpError {
                     code: err
                         .status()
                         .map(|s| ErrorCode(s.as_u16() as i32))
                         .unwrap_or(ErrorCode(-1)),
-                    message: Cow::from(err.to_string()),
+                    message: Cow::from(format!("Request failed: {err}")),
                     data: None,
                 })
             }
         }
     }
 
+    #[tool(description = "Status of the RPKI relying party")]
+    async fn status(&self) -> Result<CallToolResult, McpError> {
+        Self::fetch_json_response::<StatusResponse>(format!("{}/api/v1/status", self.endpoint))
+            .await
+    }
+
     #[tool(
         description = "Returns a JSON object indicating whether a route announcement identified by its origin Autonomous System Number (ASN) and IP address prefix is RPKI valid, invalid, or not found. The response also includes the complete set of Validated ROA Payloads (VRPs) that determined this outcome"
     )]
     async fn validity(&self, args: Parameters<ValidityArgs>) -> Result<CallToolResult, McpError> {
-        match reqwest::get(format!(
+        Self::fetch_json_response::<ValidityResponse>(format!(
             "{}/api/v1/validity/{}/{}",
             self.endpoint, args.0.asn, args.0.prefix
         ))
         .await
-        {
-            Ok(res) => match res.json::<ValidityResponse>().await {
-                Ok(status_data) => match serde_json::to_value(status_data) {
-                    Ok(json_value) => Ok(CallToolResult::structured(json_value)),
-                    Err(err) => Err(McpError {
-                        code: ErrorCode(-1),
-                        message: Cow::from(err.to_string()),
-                        data: None,
-                    }),
-                },
-                Err(err) => {
-                    tracing::error!("{:?}", &err);
-                    Err(McpError {
-                        code: err
-                            .status()
-                            .map(|s| ErrorCode(s.as_u16() as i32))
-                            .unwrap_or(ErrorCode(-1)),
-                        message: Cow::from(err.to_string()),
-                        data: None,
-                    })
-                }
-            },
-            Err(err) => {
-                tracing::error!("{:?}", &err);
-                Err(McpError {
-                    code: err
-                        .status()
-                        .map(|s| ErrorCode(s.as_u16() as i32))
-                        .unwrap_or(ErrorCode(-1)),
-                    message: Cow::from(err.to_string()),
-                    data: None,
-                })
-            }
-        }
     }
 }
 
