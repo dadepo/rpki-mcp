@@ -77,6 +77,34 @@ struct ValidityArgs {
     prefix: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct Roa {
+    pub asn: String,
+    pub prefix: String,
+    #[serde(rename = "maxLength")]
+    pub max_length: i64,
+    pub ta: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Metadata {
+    pub generated: i64,
+    #[serde(rename = "generatedTime")]
+    pub generated_time: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Roas {
+    pub metadata: Metadata,
+    pub roas: Vec<Roa>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RoasArgs {
+    #[schemars(description = "The Autonomous System Number (ASN) to retrieve ROAs for")]
+    asn: String,
+}
+
 struct RPKITool {
     endpoint: String,
     tool_router: ToolRouter<RPKITool>,
@@ -165,6 +193,17 @@ impl RPKITool {
         Self::fetch_json_response::<ValidityResponse>(format!(
             "{}/api/v1/validity/{}/{}",
             self.endpoint, args.0.asn, args.0.prefix
+        ))
+        .await
+    }
+
+    #[tool(
+        description = "Retrieves all Route Origin Authorizations (ROAs) for a given Autonomous System Number (ASN). Returns a JSON object containing metadata and a list of ROAs associated with the specified ASN"
+    )]
+    async fn roas(&self, args: Parameters<RoasArgs>) -> Result<CallToolResult, McpError> {
+        Self::fetch_json_response::<Roas>(format!(
+            "{}/json?select-asn={}",
+            self.endpoint, args.0.asn
         ))
         .await
     }
