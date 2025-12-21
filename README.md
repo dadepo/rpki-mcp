@@ -2,6 +2,8 @@
 
 An MCP server that exposes functionalities of RPKI relying parties.
 
+**Note:** Currently, routinator is the only RPKI relying party supported.
+
 ## Building
 
 ```bash
