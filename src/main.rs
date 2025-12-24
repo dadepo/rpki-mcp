@@ -119,11 +119,23 @@ struct RPKITool {
 
 #[tool_router]
 impl RPKITool {
-    fn new(endpoint: String) -> Self {
-        Self {
+    fn new(endpoint: String) -> Result<Self, String> {
+        // Basic validation: check if it starts with http:// or https://
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            return Err("Endpoint must start with http:// or https://".to_string());
+        }
+
+        // Try to validate by creating a reqwest URL (reqwest will validate it)
+        // We can use reqwest's internal validation by attempting to use it
+        // Since reqwest::get accepts &str, we'll validate by checking basic URL structure
+        if endpoint.trim().is_empty() {
+            return Err("Endpoint cannot be empty".to_string());
+        }
+
+        Ok(Self {
             endpoint,
             tool_router: Self::tool_router(),
-        }
+        })
     }
 
     /// Generic helper to fetch JSON from an endpoint and return it as a CallToolResult
@@ -235,6 +247,7 @@ enum AppError {
     IO(IoError),
     Server(ServerInitializeError),
     Task(JoinError),
+    Input(String),
 }
 
 impl fmt::Display for AppError {
@@ -243,6 +256,7 @@ impl fmt::Display for AppError {
             AppError::IO(err) => write!(f, "IO error: {:?}", err),
             AppError::Server(err) => write!(f, "Server error: {:?}", err),
             AppError::Task(err) => write!(f, "Task error: {:?}", err),
+            AppError::Input(err) => write!(f, "Input error: {:?}", err),
         }
     }
 }
@@ -267,6 +281,12 @@ impl From<JoinError> for AppError {
     }
 }
 
+impl From<String> for AppError {
+    fn from(error: String) -> Self {
+        AppError::Input(error)
+    }
+}
+
 #[tokio::main]
 #[allow(clippy::result_large_err)]
 async fn main() -> Result<(), AppError> {
@@ -285,12 +305,19 @@ async fn main() -> Result<(), AppError> {
         .init();
 
     let args: Vec<String> = env::args().collect();
+
+    if args.len() == 1 {
+        let err_msg = "Missing required argument: endpoint URL.";
+        tracing::error!("{}", &err_msg);
+        return Err(AppError::Input(err_msg.to_string()));
+    }
+
     let endpoint = args[1].clone();
-    let service = RPKITool::new(endpoint)
+    let service = RPKITool::new(endpoint)?
         .serve(stdio())
         .await
         .inspect_err(|e| {
-            println!("Error starting server: {e}");
+            tracing::error!("Error starting server: {e}");
         })?;
     service.waiting().await?;
 
