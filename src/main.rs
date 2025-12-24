@@ -1,4 +1,4 @@
-use color_eyre::eyre::Result;
+use rmcp::service::ServerInitializeError;
 use rmcp::{
     ErrorData as McpError, ServiceExt, handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
@@ -7,6 +7,8 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::env;
+use std::error;
+use std::fmt;
 use std::fs::OpenOptions;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -136,30 +138,30 @@ impl RPKITool {
             }
         })?;
 
-                if !res.status().is_success() {
-                    let status_code = res.status().as_u16() as i32;
-                    let error_text = res
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    tracing::error!("HTTP error {}: {}", status_code, error_text);
-                    return Err(McpError {
-                        code: ErrorCode(status_code),
-                        message: Cow::from(error_text),
-                        data: None,
-                    });
-                }
+        if !res.status().is_success() {
+            let status_code = res.status().as_u16() as i32;
+            let error_text = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            tracing::error!("HTTP error {}: {}", status_code, error_text);
+            return Err(McpError {
+                code: ErrorCode(status_code),
+                message: Cow::from(error_text),
+                data: None,
+            });
+        }
 
         let data = res.json::<T>().await.map_err(|err| {
-                        tracing::error!("Failed to parse JSON response: {:?}", err);
+            tracing::error!("Failed to parse JSON response: {:?}", err);
             McpError {
-                            code: err
-                                .status()
-                                .map(|s| ErrorCode(s.as_u16() as i32))
-                                .unwrap_or(ErrorCode(-1)),
-                            message: Cow::from(format!("Failed to parse response: {err}")),
-                            data: None,
-                    }
+                code: err
+                    .status()
+                    .map(|s| ErrorCode(s.as_u16() as i32))
+                    .unwrap_or(ErrorCode(-1)),
+                message: Cow::from(format!("Failed to parse response: {err}")),
+                data: None,
+            }
         })?;
 
         let json_value = serde_json::to_value(data).map_err(|err| {
@@ -167,7 +169,7 @@ impl RPKITool {
             McpError {
                 code: ErrorCode(-1),
                 message: Cow::from(format!("Failed to serialize response: {err}")),
-                    data: None,
+                data: None,
             }
         })?;
 
@@ -222,8 +224,47 @@ impl rmcp::ServerHandler for RPKITool {
     }
 }
 
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum AppError {
+    IO(std::io::Error),
+    Server(ServerInitializeError),
+    Task(tokio::task::JoinError),
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::IO(err) => write!(f, "IO error: {:?}", err),
+            AppError::Server(err) => write!(f, "Server error: {:?}", err),
+            AppError::Task(err) => write!(f, "Task error: {:?}", err),
+        }
+    }
+}
+
+impl error::Error for AppError {}
+
+impl From<std::io::Error> for AppError {
+    fn from(error: std::io::Error) -> Self {
+        AppError::IO(error)
+    }
+}
+
+impl From<ServerInitializeError> for AppError {
+    fn from(error: ServerInitializeError) -> Self {
+        AppError::Server(error)
+    }
+}
+
+impl From<tokio::task::JoinError> for AppError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        AppError::Task(error)
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+#[allow(clippy::result_large_err)]
+async fn main() -> Result<(), AppError> {
     // Create logs directory if it doesn't exist
     std::fs::create_dir_all("logs")?;
 
