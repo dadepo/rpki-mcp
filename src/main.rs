@@ -124,9 +124,18 @@ impl RPKITool {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        match reqwest::get(&url).await {
-            Ok(res) => {
-                // Handle HTTP error status codes
+        let res = reqwest::get(&url).await.map_err(|err| {
+            tracing::error!("Request failed: {:?}", err);
+            McpError {
+                code: err
+                    .status()
+                    .map(|s| ErrorCode(s.as_u16() as i32))
+                    .unwrap_or(ErrorCode(-1)),
+                message: Cow::from(format!("Request failed: {err}")),
+                data: None,
+            }
+        })?;
+
                 if !res.status().is_success() {
                     let status_code = res.status().as_u16() as i32;
                     let error_text = res
@@ -141,43 +150,28 @@ impl RPKITool {
                     });
                 }
 
-                match res.json::<T>().await {
-                    Ok(data) => match serde_json::to_value(data) {
-                        Ok(json_value) => Ok(CallToolResult::structured(json_value)),
-                        Err(err) => {
-                            tracing::error!("Failed to serialize response: {:?}", err);
-                            Err(McpError {
-                                code: ErrorCode(-1),
-                                message: Cow::from(format!("Failed to serialize response: {err}")),
-                                data: None,
-                            })
-                        }
-                    },
-                    Err(err) => {
+        let data = res.json::<T>().await.map_err(|err| {
                         tracing::error!("Failed to parse JSON response: {:?}", err);
-                        Err(McpError {
+            McpError {
                             code: err
                                 .status()
                                 .map(|s| ErrorCode(s.as_u16() as i32))
                                 .unwrap_or(ErrorCode(-1)),
                             message: Cow::from(format!("Failed to parse response: {err}")),
                             data: None,
-                        })
                     }
-                }
-            }
-            Err(err) => {
-                tracing::error!("Request failed: {:?}", err);
-                Err(McpError {
-                    code: err
-                        .status()
-                        .map(|s| ErrorCode(s.as_u16() as i32))
-                        .unwrap_or(ErrorCode(-1)),
-                    message: Cow::from(format!("Request failed: {err}")),
+        })?;
+
+        let json_value = serde_json::to_value(data).map_err(|err| {
+            tracing::error!("Failed to serialize response: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Failed to serialize response: {err}")),
                     data: None,
-                })
             }
-        }
+        })?;
+
+        Ok(CallToolResult::structured(json_value))
     }
 
     #[tool(description = "Status of the RPKI relying party")]
