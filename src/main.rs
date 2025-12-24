@@ -1,13 +1,20 @@
-use color_eyre::eyre::Result;
+use std::{
+    borrow::Cow,
+    env, error, fmt,
+    fs::{self, OpenOptions},
+    io::Error as IoError,
+};
+
 use rmcp::{
-    ErrorData as McpError, ServiceExt, handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
+    ErrorData as McpError, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    service::ServerInitializeError,
+    tool, tool_handler, tool_router,
     transport::stdio,
 };
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
-use std::env;
-use std::fs::OpenOptions;
+use tokio::task::JoinError;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -112,11 +119,23 @@ struct RPKITool {
 
 #[tool_router]
 impl RPKITool {
-    fn new(endpoint: String) -> Self {
-        Self {
+    fn new(endpoint: String) -> Result<Self, String> {
+        // Basic validation: check if it starts with http:// or https://
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            return Err("Endpoint must start with http:// or https://".to_string());
+        }
+
+        // Try to validate by creating a reqwest URL (reqwest will validate it)
+        // We can use reqwest's internal validation by attempting to use it
+        // Since reqwest::get accepts &str, we'll validate by checking basic URL structure
+        if endpoint.trim().is_empty() {
+            return Err("Endpoint cannot be empty".to_string());
+        }
+
+        Ok(Self {
             endpoint,
             tool_router: Self::tool_router(),
-        }
+        })
     }
 
     /// Generic helper to fetch JSON from an endpoint and return it as a CallToolResult
@@ -124,60 +143,54 @@ impl RPKITool {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        match reqwest::get(&url).await {
-            Ok(res) => {
-                // Handle HTTP error status codes
-                if !res.status().is_success() {
-                    let status_code = res.status().as_u16() as i32;
-                    let error_text = res
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    tracing::error!("HTTP error {}: {}", status_code, error_text);
-                    return Err(McpError {
-                        code: ErrorCode(status_code),
-                        message: Cow::from(error_text),
-                        data: None,
-                    });
-                }
+        let res = reqwest::get(&url).await.map_err(|err| {
+            tracing::error!("Request failed: {:?}", err);
+            McpError {
+                code: err
+                    .status()
+                    .map(|s| ErrorCode(s.as_u16() as i32))
+                    .unwrap_or(ErrorCode(-1)),
+                message: Cow::from(format!("Request failed: {err}")),
+                data: None,
+            }
+        })?;
 
-                match res.json::<T>().await {
-                    Ok(data) => match serde_json::to_value(data) {
-                        Ok(json_value) => Ok(CallToolResult::structured(json_value)),
-                        Err(err) => {
-                            tracing::error!("Failed to serialize response: {:?}", err);
-                            Err(McpError {
-                                code: ErrorCode(-1),
-                                message: Cow::from(format!("Failed to serialize response: {err}")),
-                                data: None,
-                            })
-                        }
-                    },
-                    Err(err) => {
-                        tracing::error!("Failed to parse JSON response: {:?}", err);
-                        Err(McpError {
-                            code: err
-                                .status()
-                                .map(|s| ErrorCode(s.as_u16() as i32))
-                                .unwrap_or(ErrorCode(-1)),
-                            message: Cow::from(format!("Failed to parse response: {err}")),
-                            data: None,
-                        })
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::error!("Request failed: {:?}", err);
-                Err(McpError {
-                    code: err
-                        .status()
-                        .map(|s| ErrorCode(s.as_u16() as i32))
-                        .unwrap_or(ErrorCode(-1)),
-                    message: Cow::from(format!("Request failed: {err}")),
-                    data: None,
-                })
-            }
+        if !res.status().is_success() {
+            let status_code = res.status().as_u16() as i32;
+            let error_text = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            tracing::error!("HTTP error {}: {}", status_code, error_text);
+            return Err(McpError {
+                code: ErrorCode(status_code),
+                message: Cow::from(error_text),
+                data: None,
+            });
         }
+
+        let data = res.json::<T>().await.map_err(|err| {
+            tracing::error!("Failed to parse JSON response: {:?}", err);
+            McpError {
+                code: err
+                    .status()
+                    .map(|s| ErrorCode(s.as_u16() as i32))
+                    .unwrap_or(ErrorCode(-1)),
+                message: Cow::from(format!("Failed to parse response: {err}")),
+                data: None,
+            }
+        })?;
+
+        let json_value = serde_json::to_value(data).map_err(|err| {
+            tracing::error!("Failed to serialize response: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Failed to serialize response: {err}")),
+                data: None,
+            }
+        })?;
+
+        Ok(CallToolResult::structured(json_value))
     }
 
     #[tool(description = "Status of the RPKI relying party")]
@@ -210,7 +223,7 @@ impl RPKITool {
 }
 
 #[tool_handler]
-impl rmcp::ServerHandler for RPKITool {
+impl ServerHandler for RPKITool {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
@@ -228,10 +241,57 @@ impl rmcp::ServerHandler for RPKITool {
     }
 }
 
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum AppError {
+    IO(IoError),
+    Server(ServerInitializeError),
+    Task(JoinError),
+    Input(String),
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::IO(err) => write!(f, "IO error: {:?}", err),
+            AppError::Server(err) => write!(f, "Server error: {:?}", err),
+            AppError::Task(err) => write!(f, "Task error: {:?}", err),
+            AppError::Input(err) => write!(f, "Input error: {:?}", err),
+        }
+    }
+}
+
+impl error::Error for AppError {}
+
+impl From<IoError> for AppError {
+    fn from(error: IoError) -> Self {
+        AppError::IO(error)
+    }
+}
+
+impl From<ServerInitializeError> for AppError {
+    fn from(error: ServerInitializeError) -> Self {
+        AppError::Server(error)
+    }
+}
+
+impl From<JoinError> for AppError {
+    fn from(error: JoinError) -> Self {
+        AppError::Task(error)
+    }
+}
+
+impl From<String> for AppError {
+    fn from(error: String) -> Self {
+        AppError::Input(error)
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+#[allow(clippy::result_large_err)]
+async fn main() -> Result<(), AppError> {
     // Create logs directory if it doesn't exist
-    std::fs::create_dir_all("logs")?;
+    fs::create_dir_all("logs")?;
 
     // Initialize tracing subscriber to write to a file
     let log_file = OpenOptions::new()
@@ -245,12 +305,19 @@ async fn main() -> Result<()> {
         .init();
 
     let args: Vec<String> = env::args().collect();
+
+    if args.len() == 1 {
+        let err_msg = "Missing required argument: endpoint URL.";
+        tracing::error!("{}", &err_msg);
+        return Err(AppError::Input(err_msg.to_string()));
+    }
+
     let endpoint = args[1].clone();
-    let service = RPKITool::new(endpoint)
+    let service = RPKITool::new(endpoint)?
         .serve(stdio())
         .await
         .inspect_err(|e| {
-            println!("Error starting server: {e}");
+            tracing::error!("Error starting server: {e}");
         })?;
     service.waiting().await?;
 
