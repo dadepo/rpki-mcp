@@ -1,15 +1,20 @@
-use rmcp::service::ServerInitializeError;
+use std::{
+    borrow::Cow,
+    env, error, fmt,
+    fs::{self, OpenOptions},
+    io::Error as IoError,
+};
+
 use rmcp::{
-    ErrorData as McpError, ServiceExt, handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
+    ErrorData as McpError, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    service::ServerInitializeError,
+    tool, tool_handler, tool_router,
     transport::stdio,
 };
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
-use std::env;
-use std::error;
-use std::fmt;
-use std::fs::OpenOptions;
+use tokio::task::JoinError;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -206,7 +211,7 @@ impl RPKITool {
 }
 
 #[tool_handler]
-impl rmcp::ServerHandler for RPKITool {
+impl ServerHandler for RPKITool {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
@@ -227,9 +232,9 @@ impl rmcp::ServerHandler for RPKITool {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum AppError {
-    IO(std::io::Error),
+    IO(IoError),
     Server(ServerInitializeError),
-    Task(tokio::task::JoinError),
+    Task(JoinError),
 }
 
 impl fmt::Display for AppError {
@@ -244,8 +249,8 @@ impl fmt::Display for AppError {
 
 impl error::Error for AppError {}
 
-impl From<std::io::Error> for AppError {
-    fn from(error: std::io::Error) -> Self {
+impl From<IoError> for AppError {
+    fn from(error: IoError) -> Self {
         AppError::IO(error)
     }
 }
@@ -256,8 +261,8 @@ impl From<ServerInitializeError> for AppError {
     }
 }
 
-impl From<tokio::task::JoinError> for AppError {
-    fn from(error: tokio::task::JoinError) -> Self {
+impl From<JoinError> for AppError {
+    fn from(error: JoinError) -> Self {
         AppError::Task(error)
     }
 }
@@ -266,7 +271,7 @@ impl From<tokio::task::JoinError> for AppError {
 #[allow(clippy::result_large_err)]
 async fn main() -> Result<(), AppError> {
     // Create logs directory if it doesn't exist
-    std::fs::create_dir_all("logs")?;
+    fs::create_dir_all("logs")?;
 
     // Initialize tracing subscriber to write to a file
     let log_file = OpenOptions::new()
