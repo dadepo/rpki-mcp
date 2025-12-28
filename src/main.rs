@@ -16,6 +16,39 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinError;
 
+trait IntoMcpError<T> {
+    fn into_mcp_error(self) -> Result<T, McpError>;
+}
+
+impl<T> IntoMcpError<T> for Result<T, reqwest::Error> {
+    fn into_mcp_error(self) -> Result<T, McpError> {
+        self.map_err(|err| {
+            tracing::error!("Request failed: {:?}", err);
+            McpError {
+                code: err
+                    .status()
+                    .map(|s| ErrorCode(s.as_u16() as i32))
+                    .unwrap_or(ErrorCode(-1)),
+                message: Cow::from(format!("Request failed: {err}")),
+                data: None,
+            }
+        })
+    }
+}
+
+impl<T> IntoMcpError<T> for Result<T, serde_json::Error> {
+    fn into_mcp_error(self) -> Result<T, McpError> {
+        self.map_err(|err| {
+            tracing::error!("Failed to serialize: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Failed to serialize response: {err}")),
+                data: None,
+            }
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum StatusResponse {
@@ -143,17 +176,7 @@ impl RPKITool {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        let res = reqwest::get(&url).await.map_err(|err| {
-            tracing::error!("Request failed: {:?}", err);
-            McpError {
-                code: err
-                    .status()
-                    .map(|s| ErrorCode(s.as_u16() as i32))
-                    .unwrap_or(ErrorCode(-1)),
-                message: Cow::from(format!("Request failed: {err}")),
-                data: None,
-            }
-        })?;
+        let res = reqwest::get(&url).await.into_mcp_error()?;
 
         if !res.status().is_success() {
             let status_code = res.status().as_u16() as i32;
@@ -169,26 +192,9 @@ impl RPKITool {
             });
         }
 
-        let data = res.json::<T>().await.map_err(|err| {
-            tracing::error!("Failed to parse JSON response: {:?}", err);
-            McpError {
-                code: err
-                    .status()
-                    .map(|s| ErrorCode(s.as_u16() as i32))
-                    .unwrap_or(ErrorCode(-1)),
-                message: Cow::from(format!("Failed to parse response: {err}")),
-                data: None,
-            }
-        })?;
+        let data = res.json::<T>().await.into_mcp_error()?;
 
-        let json_value = serde_json::to_value(data).map_err(|err| {
-            tracing::error!("Failed to serialize response: {:?}", err);
-            McpError {
-                code: ErrorCode(-1),
-                message: Cow::from(format!("Failed to serialize response: {err}")),
-                data: None,
-            }
-        })?;
+        let json_value = serde_json::to_value(data).into_mcp_error()?;
 
         Ok(CallToolResult::structured(json_value))
     }
