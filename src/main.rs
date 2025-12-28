@@ -8,6 +8,7 @@ use rmcp::{
 };
 use rpki::repository::Roa;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::{
     borrow::Cow,
     env, error, fmt,
@@ -43,6 +44,32 @@ impl<T> IntoMcpError<T> for Result<T, serde_json::Error> {
             McpError {
                 code: ErrorCode(-1),
                 message: Cow::from(format!("Failed to serialize response: {err}")),
+                data: None,
+            }
+        })
+    }
+}
+
+impl<T> IntoMcpError<T> for Result<T, std::io::Error> {
+    fn into_mcp_error(self) -> Result<T, McpError> {
+        self.map_err(|err| {
+            tracing::error!("Failed to read file: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Failed to read file: {err}")),
+                data: None,
+            }
+        })
+    }
+}
+
+impl<T> IntoMcpError<T> for Result<T, rpki::dep::bcder::decode::DecodeError<Infallible>> {
+    fn into_mcp_error(self) -> Result<T, McpError> {
+        self.map_err(|err| {
+            tracing::error!("Failed to decode file: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Failed to decode file: {err}")),
                 data: None,
             }
         })
@@ -168,14 +195,7 @@ impl RPKITool {
     where
         T: for<'de> Deserialize<'de> + Serialize,
     {
-        let json_value = serde_json::to_value(data).map_err(|err| {
-            tracing::error!("Failed to serialize response: {:?}", err);
-            McpError {
-                code: ErrorCode(-1),
-                message: Cow::from(format!("Failed to serialize response: {err}")),
-                data: None,
-            }
-        })?;
+        let json_value = serde_json::to_value(data).into_mcp_error()?;
         Ok(json_value)
     }
 
@@ -261,23 +281,9 @@ impl RPKITool {
         &self,
         path: Parameters<ParseRoaFileArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let roa_bytes = fs::read(path.0.path).map_err(|err| {
-            tracing::error!("Reading ROA file failed: {:?}", err);
-            McpError {
-                code: ErrorCode(-1),
-                message: Cow::from(format!("Reading ROA file failed: {err}")),
-                data: None,
-            }
-        })?;
+        let roa_bytes = fs::read(path.0.path).into_mcp_error()?;
 
-        let roa: Roa = Roa::decode(roa_bytes.as_ref(), false).map_err(|err| {
-            tracing::error!("Decoding ROA file failed: {:?}", err);
-            McpError {
-                code: ErrorCode(-1),
-                message: Cow::from(format!("Decoding ROA file failed: {err}")),
-                data: None,
-            }
-        })?;
+        let roa: Roa = Roa::decode(roa_bytes.as_ref(), false).into_mcp_error()?;
 
         let roa_content = roa.content();
         let asn = roa_content.as_id().to_string();
