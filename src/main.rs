@@ -1,10 +1,3 @@
-use std::{
-    borrow::Cow,
-    env, error, fmt,
-    fs::{self, OpenOptions},
-    io::Error as IoError,
-};
-
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -13,7 +6,14 @@ use rmcp::{
     tool, tool_handler, tool_router,
     transport::stdio,
 };
+use rpki::repository::Roa;
 use serde::{Deserialize, Serialize};
+use std::{
+    borrow::Cow,
+    env, error, fmt,
+    fs::{self, OpenOptions},
+    io::Error as IoError,
+};
 use tokio::task::JoinError;
 
 trait IntoMcpError<T> {
@@ -118,7 +118,7 @@ struct ValidityArgs {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Roa {
+struct FetchedRoa {
     pub asn: String,
     pub prefix: String,
     #[serde(rename = "maxLength")]
@@ -134,9 +134,9 @@ struct Metadata {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Roas {
+struct FetchedRoas {
     pub metadata: Metadata,
-    pub roas: Vec<Roa>,
+    pub roas: Vec<FetchedRoa>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -145,13 +145,40 @@ struct RoasArgs {
     asn: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ParseRoaFileArgs {
+    #[schemars(description = "The file path to the ROA file to parse")]
+    path: String,
+}
 struct RPKITool {
     endpoint: String,
     tool_router: ToolRouter<RPKITool>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ParsedRoa {
+    pub asn: String,
+    pub v4_prefix: Vec<String>,
+    pub v6_prefix: Vec<String>,
+}
+
 #[tool_router]
 impl RPKITool {
+    fn to_json<T>(data: T) -> Result<serde_json::Value, McpError>
+    where
+        T: for<'de> Deserialize<'de> + Serialize,
+    {
+        let json_value = serde_json::to_value(data).map_err(|err| {
+            tracing::error!("Failed to serialize response: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Failed to serialize response: {err}")),
+                data: None,
+            }
+        })?;
+        Ok(json_value)
+    }
+
     fn new(endpoint: String) -> Result<Self, String> {
         // Basic validation: check if it starts with http:// or https://
         if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
@@ -194,7 +221,7 @@ impl RPKITool {
 
         let data = res.json::<T>().await.into_mcp_error()?;
 
-        let json_value = serde_json::to_value(data).into_mcp_error()?;
+        let json_value = RPKITool::to_json(data)?;
 
         Ok(CallToolResult::structured(json_value))
     }
@@ -220,11 +247,61 @@ impl RPKITool {
         description = "Retrieves all Route Origin Authorizations (ROAs) for a given Autonomous System Number (ASN). Returns a JSON object containing metadata and a list of ROAs associated with the specified ASN"
     )]
     async fn roas(&self, args: Parameters<RoasArgs>) -> Result<CallToolResult, McpError> {
-        Self::fetch_json_response::<Roas>(format!(
+        Self::fetch_json_response::<FetchedRoas>(format!(
             "{}/json?select-asn={}",
             self.endpoint, args.0.asn
         ))
         .await
+    }
+
+    #[tool(
+        description = "Parses a local ROA (Route Origin Authorization) file from the filesystem and returns its decoded content as JSON. The file path must be provided and the file must be a valid ROA file that can be decoded."
+    )]
+    async fn parse_roa_file(
+        &self,
+        path: Parameters<ParseRoaFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let roa_bytes = fs::read(path.0.path).map_err(|err| {
+            tracing::error!("Reading ROA file failed: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Reading ROA file failed: {err}")),
+                data: None,
+            }
+        })?;
+
+        let roa: Roa = Roa::decode(roa_bytes.as_ref(), false).map_err(|err| {
+            tracing::error!("Decoding ROA file failed: {:?}", err);
+            McpError {
+                code: ErrorCode(-1),
+                message: Cow::from(format!("Decoding ROA file failed: {err}")),
+                data: None,
+            }
+        })?;
+
+        let roa_content = roa.content();
+        let asn = roa_content.as_id().to_string();
+        let v4_prefix: Vec<_> = roa_content
+            .v4_addrs()
+            .iter()
+            .map(|addr| addr.prefix().to_v4().to_string())
+            .collect();
+
+        let v6_prefix: Vec<_> = roa_content
+            .v6_addrs()
+            .iter()
+            .map(|addr| addr.prefix().to_v6().to_string())
+            .collect();
+
+        let parsed = ParsedRoa {
+            asn,
+            v4_prefix,
+            v6_prefix,
+        };
+
+        let json_value = RPKITool::to_json(parsed)?;
+
+        Ok(CallToolResult::structured(json_value))
     }
 }
 
