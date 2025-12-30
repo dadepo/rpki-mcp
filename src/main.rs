@@ -177,16 +177,17 @@ struct ParseRoaFileArgs {
     #[schemars(description = "The file path to the ROA file to parse")]
     path: String,
 }
-struct RPKITool {
-    endpoint: String,
-    tool_router: ToolRouter<RPKITool>,
-}
 
 #[derive(Serialize, Deserialize)]
 struct ParsedRoa {
     pub asn: String,
     pub v4_prefix: Vec<String>,
     pub v6_prefix: Vec<String>,
+}
+
+struct RPKITool {
+    endpoint: String,
+    tool_router: ToolRouter<RPKITool>,
 }
 
 #[tool_router]
