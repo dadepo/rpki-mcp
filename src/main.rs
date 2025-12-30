@@ -177,9 +177,17 @@ struct ParseRoaFileArgs {
     #[schemars(description = "The file path to the ROA file to parse")]
     path: String,
 }
-struct RPKITool {
-    endpoint: String,
-    tool_router: ToolRouter<RPKITool>,
+
+#[derive(Serialize, Deserialize)]
+struct RoaCertValidity {
+    pub not_before: String,
+    pub not_after: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RoaCert {
+    pub subject_key_id: String,
+    pub validity: RoaCertValidity,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -187,6 +195,12 @@ struct ParsedRoa {
     pub asn: String,
     pub v4_prefix: Vec<String>,
     pub v6_prefix: Vec<String>,
+    pub certificate_info: RoaCert,
+}
+
+struct RPKITool {
+    endpoint: String,
+    tool_router: ToolRouter<RPKITool>,
 }
 
 #[tool_router]
@@ -285,6 +299,17 @@ impl RPKITool {
 
         let roa: Roa = Roa::decode(roa_bytes.as_ref(), false).into_mcp_error()?;
 
+        let roa_cert = roa.cert();
+        let roa_validity = roa_cert.validity();
+
+        let certificate = RoaCert {
+            subject_key_id: roa_cert.subject_key_identifier().to_string(),
+            validity: RoaCertValidity {
+                not_before: roa_validity.not_before().to_string(),
+                not_after: roa_validity.not_after().to_string(),
+            },
+        };
+
         let roa_content = roa.content();
         let asn = roa_content.as_id().to_string();
         let v4_prefix: Vec<_> = roa_content
@@ -303,6 +328,7 @@ impl RPKITool {
             asn,
             v4_prefix,
             v6_prefix,
+            certificate_info: certificate,
         };
 
         let json_value = RPKITool::to_json(parsed)?;
