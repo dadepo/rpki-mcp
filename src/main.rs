@@ -242,11 +242,12 @@ impl RPKITool {
             let error_text = res
                 .text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .map(Cow::Owned)
+                .unwrap_or_else(|_| Cow::Borrowed("Unknown error"));
             tracing::error!("HTTP error {}: {}", status_code, error_text);
             return Err(McpError {
                 code: ErrorCode(status_code),
-                message: Cow::from(error_text),
+                message: error_text,
                 data: None,
             });
         }
