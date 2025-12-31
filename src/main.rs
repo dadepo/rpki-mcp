@@ -6,9 +6,13 @@ use rmcp::{
     tool, tool_handler, tool_router,
     transport::stdio,
 };
+use rpki::crypto::KeyIdentifier;
 use rpki::repository::Roa;
+use rpki::repository::x509::Validity as CertValidity;
+use rpki::resources::Asn;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
     borrow::Cow,
     env, error, fmt,
@@ -179,22 +183,16 @@ struct ParseRoaFileArgs {
 }
 
 #[derive(Serialize, Deserialize)]
-struct RoaCertValidity {
-    pub not_before: String,
-    pub not_after: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct RoaCert {
-    pub subject_key_id: String,
-    pub validity: RoaCertValidity,
+    pub subject_key_id: KeyIdentifier,
+    pub validity: CertValidity,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ParsedRoa {
-    pub asn: String,
-    pub v4_prefix: Vec<String>,
-    pub v6_prefix: Vec<String>,
+    pub asn: Asn,
+    pub v4_prefix: Vec<Ipv4Addr>,
+    pub v6_prefix: Vec<Ipv6Addr>,
     pub certificate_info: RoaCert,
 }
 
@@ -244,11 +242,12 @@ impl RPKITool {
             let error_text = res
                 .text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .map(Cow::Owned)
+                .unwrap_or_else(|_| Cow::Borrowed("Unknown error"));
             tracing::error!("HTTP error {}: {}", status_code, error_text);
             return Err(McpError {
                 code: ErrorCode(status_code),
-                message: Cow::from(error_text),
+                message: error_text,
                 data: None,
             });
         }
@@ -300,28 +299,24 @@ impl RPKITool {
         let roa: Roa = Roa::decode(roa_bytes.as_ref(), false).into_mcp_error()?;
 
         let roa_cert = roa.cert();
-        let roa_validity = roa_cert.validity();
 
         let certificate = RoaCert {
-            subject_key_id: roa_cert.subject_key_identifier().to_string(),
-            validity: RoaCertValidity {
-                not_before: roa_validity.not_before().to_string(),
-                not_after: roa_validity.not_after().to_string(),
-            },
+            subject_key_id: roa_cert.subject_key_identifier(),
+            validity: roa_cert.validity(),
         };
 
         let roa_content = roa.content();
-        let asn = roa_content.as_id().to_string();
+        let asn = roa_content.as_id();
         let v4_prefix: Vec<_> = roa_content
             .v4_addrs()
             .iter()
-            .map(|addr| addr.prefix().to_v4().to_string())
+            .map(|addr| addr.prefix().to_v4())
             .collect();
 
         let v6_prefix: Vec<_> = roa_content
             .v6_addrs()
             .iter()
-            .map(|addr| addr.prefix().to_v6().to_string())
+            .map(|addr| addr.prefix().to_v6())
             .collect();
 
         let parsed = ParsedRoa {
