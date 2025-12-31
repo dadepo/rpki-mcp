@@ -985,6 +985,7 @@ dependencies = [
  "chrono",
  "log",
  "ring",
+ "serde",
  "untrusted",
  "uuid",
 ]
