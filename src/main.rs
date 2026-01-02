@@ -414,7 +414,7 @@ async fn main() -> Result<(), AppError> {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
         let err_msg = "Missing required argument: endpoint URL.";
@@ -422,7 +422,7 @@ async fn main() -> Result<(), AppError> {
         return Err(AppError::Input(err_msg.to_string()));
     }
 
-    let endpoint = args[1].clone();
+    let endpoint = args.remove(1);
     let service = RPKITool::new(endpoint)?
         .serve(stdio())
         .await
