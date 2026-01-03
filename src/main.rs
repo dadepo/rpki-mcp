@@ -7,8 +7,8 @@ use rmcp::{
     transport::stdio,
 };
 use rpki::crypto::KeyIdentifier;
-use rpki::repository::Roa;
 use rpki::repository::x509::Validity as CertValidity;
+use rpki::repository::{Cert, Roa};
 use rpki::resources::Asn;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -182,6 +182,12 @@ struct ParseRoaFileArgs {
     path: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ParseCertArgs {
+    #[schemars(description = "The file path to the certifcate to parse")]
+    path: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct RoaCert {
     pub subject_key_id: KeyIdentifier,
@@ -194,6 +200,13 @@ struct ParsedRoa {
     pub v4_prefix: Vec<Ipv4Addr>,
     pub v6_prefix: Vec<Ipv6Addr>,
     pub certificate_info: RoaCert,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ParsedCert {
+    pub subject_key_id: KeyIdentifier,
+    pub validity: CertValidity,
+    pub certificate: Cert,
 }
 
 struct RPKITool {
@@ -328,6 +341,25 @@ impl RPKITool {
 
         let json_value = RPKITool::to_json(parsed)?;
 
+        Ok(CallToolResult::structured(json_value))
+    }
+
+    #[tool(
+        description = "Parses a local RPKI certificate file from the filesystem and returns its decoded content as JSON. The file path must be provided and the file must be a valid certificate file that can be decoded."
+    )]
+    async fn parse_certificate(
+        &self,
+        path: Parameters<ParseCertArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let cert_bytes = fs::read(path.0.path).into_mcp_error()?;
+
+        let certificate: Cert = Cert::decode(cert_bytes.as_ref()).into_mcp_error()?;
+
+        let json_value = RPKITool::to_json(ParsedCert {
+            subject_key_id: certificate.subject_key_identifier(),
+            validity: certificate.validity(),
+            certificate,
+        })?;
         Ok(CallToolResult::structured(json_value))
     }
 }
